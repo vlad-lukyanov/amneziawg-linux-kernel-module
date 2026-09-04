@@ -141,7 +141,7 @@ static int lookup_genl_family(const char *name)
 
 static int base64_decode(const char *src, unsigned char *dst, int dst_len)
 {
-	static const unsigned char b64_table[256] = {
+	static const signed char b64_table[256] = {
 		['A'] = 0, ['B'] = 1, ['C'] = 2, ['D'] = 3, ['E'] = 4, ['F'] = 5,
 		['G'] = 6, ['H'] = 7, ['I'] = 8, ['J'] = 9, ['K'] = 10, ['L'] = 11,
 		['M'] = 12, ['N'] = 13, ['O'] = 14, ['P'] = 15, ['Q'] = 16, ['R'] = 17,
@@ -154,21 +154,52 @@ static int base64_decode(const char *src, unsigned char *dst, int dst_len)
 		['y'] = 50, ['z'] = 51,
 		['0'] = 52, ['1'] = 53, ['2'] = 54, ['3'] = 55, ['4'] = 56,
 		['5'] = 57, ['6'] = 58, ['7'] = 59, ['8'] = 60, ['9'] = 61,
-		['+'] = 62, ['/'] = 63,
+		['+'] = 62, ['/'] = 63, ['='] = 0,
 	};
-	int len = strlen(src), i, j = 0;
+	int i = 0, j = 0;
 	uint32_t val = 0;
+	int pad = 0;
 
-	for (i = 0; i < len && src[i] != '='; i++) {
-		val = (val << 6) | b64_table[(unsigned char)src[i]];
-		if (i % 4 == 3) {
-			if (j + 3 <= dst_len) { dst[j++] = val >> 16; dst[j++] = (val >> 8) & 0xff; dst[j++] = val & 0xff; }
+	if (src[0] == '\0') return -1;
+
+	while (src[i] && src[i] != '=') i++;
+	/* Count padding */
+	pad = (src[i] == '=') ? (src[i+1] == '=' ? 2 : 1) : 0;
+	int data_len = i;
+	int total = data_len + pad;
+	int out_len = (total / 4) * 3 - pad;
+
+	if (out_len > dst_len) return -1;
+
+	/* Reset and re-decode properly */
+	i = 0;
+	j = 0;
+	val = 0;
+	int group = 0;
+	while (j < out_len) {
+		signed char c = b64_table[(unsigned char)src[i]];
+		if (c < 0 && src[i] != '=') return -1;
+		i++;
+		val = (val << 6) | c;
+		group++;
+		if (group == 4) {
+			if (j < out_len) dst[j++] = val >> 16;
+			if (j < out_len) dst[j++] = (val >> 8) & 0xff;
+			if (j < out_len) dst[j++] = val & 0xff;
 			val = 0;
+			group = 0;
 		}
 	}
-	if (i % 4 == 3) return -1;
-	if (i % 4 == 2) { if (j < dst_len) dst[j++] = val >> 10; }
-	if (i % 4 == 1) { if (j + 2 <= dst_len) { dst[j++] = val >> 16; dst[j++] = (val >> 8) & 0xff; } }
+	/* Handle remaining padding */
+	if (group == 3) {
+		val <<= 6;
+		if (j < out_len) dst[j++] = val >> 16;
+		if (j < out_len) dst[j++] = (val >> 8) & 0xff;
+	} else if (group == 2) {
+		val <<= 12;
+		if (j < out_len) dst[j++] = val >> 16;
+	}
+
 	return j;
 }
 
