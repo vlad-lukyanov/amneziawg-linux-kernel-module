@@ -90,6 +90,39 @@ static inline size_t awg_determine_type_and_padding(struct sk_buff *skb,
 		return sizeof(struct message_data);
 	}
 
+	/* Fallback: standard WireGuard without junk padding */
+	if (skb->len == sizeof(struct message_handshake_initiation) &&
+		(ptr = skb_header_pointer(skb, 0, sizeof(buf), buf)) != NULL &&
+		le32_to_cpu(*(u32 *)ptr) == MESSAGE_HANDSHAKE_INITIATION) {
+		*res_padding = 0;
+		*res_type = MESSAGE_HANDSHAKE_INITIATION;
+		return sizeof(struct message_handshake_initiation);
+	}
+
+	if (skb->len == sizeof(struct message_handshake_response) &&
+		(ptr = skb_header_pointer(skb, 0, sizeof(buf), buf)) != NULL &&
+		le32_to_cpu(*(u32 *)ptr) == MESSAGE_HANDSHAKE_RESPONSE) {
+		*res_padding = 0;
+		*res_type = MESSAGE_HANDSHAKE_RESPONSE;
+		return sizeof(struct message_handshake_response);
+	}
+
+	if (skb->len == sizeof(struct message_handshake_cookie) &&
+		(ptr = skb_header_pointer(skb, 0, sizeof(buf), buf)) != NULL &&
+		le32_to_cpu(*(u32 *)ptr) == MESSAGE_HANDSHAKE_COOKIE) {
+		*res_padding = 0;
+		*res_type = MESSAGE_HANDSHAKE_COOKIE;
+		return sizeof(struct message_handshake_cookie);
+	}
+
+	if (skb->len >= MESSAGE_MINIMUM_LENGTH &&
+		(ptr = skb_header_pointer(skb, 0, sizeof(buf), buf)) != NULL &&
+		le32_to_cpu(*(u32 *)ptr) == MESSAGE_DATA) {
+		*res_padding = 0;
+		*res_type = MESSAGE_DATA;
+		return sizeof(struct message_data);
+	}
+
 	net_dbg_skb_ratelimited("%s: Unknown message from %pISpfsc encountered, packet dropped\n",
 								wg->dev->name, skb);
 	*res_padding = 0;
@@ -455,6 +488,11 @@ static void wg_packet_consume_data_done(struct wg_peer *peer,
 				    &peer->endpoint.addr);
 		goto packet_processed;
 	}
+
+	/* Track S4 junk offsets for non-keepalive transport packets */
+	if (PACKET_CB(skb)->padding > 0)
+		peer->junk_offsets = true;
+	ktime_get_real_ts64(&peer->walltime_last_data);
 
 	wg_timers_data_received(peer);
 

@@ -36,6 +36,10 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	if (unlikely(dst_cache_init(&peer->endpoint_cache, GFP_KERNEL)))
 		goto err;
 	WRITE_ONCE(peer->udp_window, DEFAULT_UDP_WINDOW);
+	peer->advanced_security = false;
+	peer->ranged_headers = false;
+	peer->junk_offsets = false;
+	memset(&peer->walltime_last_data, 0, sizeof(peer->walltime_last_data));
 
 	peer->device = wg;
 	wg_noise_handshake_init(&peer->handshake, &wg->static_identity,

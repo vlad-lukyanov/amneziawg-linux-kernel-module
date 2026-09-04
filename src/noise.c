@@ -626,6 +626,10 @@ wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 		wg_genl_mcast_peer_unknown(wg, s, endpoint);
 		goto out;
 	}
+	/* Auto-detect AWG vs WireGuard: if H1 != standard WG type, peer supports AWG obfuscation */
+	peer->advanced_security = (le32_to_cpu(src->header.type) != MESSAGE_HANDSHAKE_INITIATION);
+	/* Detect AWG 1.0 vs 2.0: if H1 != range_start, peer uses ranged headers */
+	peer->ranged_headers = (le32_to_cpu(src->header.type) != u32_range_lo(wg->init_header));
 	handshake = &peer->handshake;
 
 	/* ss */

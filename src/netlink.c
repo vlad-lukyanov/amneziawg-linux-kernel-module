@@ -82,7 +82,10 @@ static const struct nla_policy peer_policy[WGPEER_A_MAX + 1] = {
 	[WGPEER_A_TX_BYTES]				= { .type = NLA_U64 },
 	[WGPEER_A_ALLOWEDIPS]				= { .type = NLA_NESTED },
 	[WGPEER_A_PROTOCOL_VERSION]			= { .type = NLA_U32 },
-	[WGPEER_A_ADVANCED_SECURITY]    		= { .type = NLA_FLAG }
+	[WGPEER_A_ADVANCED_SECURITY]    		= { .type = NLA_FLAG },
+	[WGPEER_A_RANGED_HEADERS]			= { .type = NLA_FLAG },
+	[WGPEER_A_JUNK_OFFSETS]				= { .type = NLA_FLAG },
+	[WGPEER_A_LAST_DATA_TIME]			= NLA_POLICY_EXACT_LEN(sizeof(struct __kernel_timespec))
 };
 
 static const struct nla_policy allowedip_policy[WGALLOWEDIP_A_MAX + 1] = {
@@ -299,7 +302,12 @@ get_peer(struct wg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 			return ret;
 	}
 
-	fail = nla_put_u32(skb, WGPEER_A_FLAGS, WGPEER_F_HAS_ADVANCED_SECURITY);
+	{
+		u32 peer_flags = 0;
+		if (peer->advanced_security)
+			peer_flags |= WGPEER_F_HAS_ADVANCED_SECURITY;
+		fail = nla_put_u32(skb, WGPEER_A_FLAGS, peer_flags);
+	}
 	if (fail)
 		goto err;
 
@@ -334,6 +342,24 @@ get_peer(struct wg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 				      WGPEER_A_UNSPEC) ||
 		    nla_put_u32(skb, WGPEER_A_PROTOCOL_VERSION, 1))
 			goto err;
+
+		if (peer->ranged_headers &&
+		    nla_put_flag(skb, WGPEER_A_RANGED_HEADERS))
+			goto err;
+
+		if (peer->junk_offsets &&
+		    nla_put_flag(skb, WGPEER_A_JUNK_OFFSETS))
+			goto err;
+
+		if (peer->junk_offsets) {
+			const struct __kernel_timespec last_data = {
+				.tv_sec = peer->walltime_last_data.tv_sec,
+				.tv_nsec = peer->walltime_last_data.tv_nsec
+			};
+			if (nla_put(skb, WGPEER_A_LAST_DATA_TIME,
+				    sizeof(last_data), &last_data))
+				goto err;
+		}
 
 #ifndef OMIT_ENDPOINTS
 		read_lock_bh(&peer->endpoint_lock);

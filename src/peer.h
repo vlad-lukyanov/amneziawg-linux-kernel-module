@@ -69,6 +69,10 @@ struct wg_peer {
 	u64 internal_id;
 	atomic_t jp_packet_counter;
 	unsigned int udp_window;
+	bool advanced_security;
+	bool ranged_headers;
+	bool junk_offsets;
+	struct timespec64 walltime_last_data;
 };
 
 struct wg_peer *wg_peer_create(struct wg_device *wg,

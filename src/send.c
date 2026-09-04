@@ -25,6 +25,11 @@
 #include <net/udp.h>
 #include <net/sock.h>
 
+static inline u32 mh_peerheader(struct wg_device *wg, bool ranged, u32_range_t header)
+{
+	return ranged ? u32_range_pick_one(header) : u32_range_lo(header);
+}
+
 static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 {
 	struct message_handshake_initiation packet;
@@ -47,19 +52,22 @@ static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 			    &peer->endpoint.addr);
 
 	atomic_set(&peer->jp_packet_counter, get_random_u32());
-	for (i = 0; i < ARRAY_SIZE(wg->ispecs); ++i)
-	{
-		spec = &wg->ispecs[i];
-		if (spec->pkt_size > 0) {
-			mutex_lock(&spec->lock);
-			jp_spec_applymods(spec, peer);
-			wg_socket_send_buffer_to_peer(peer, spec->pkt, spec->pkt_size, 0, 0);
-			atomic_inc(&peer->jp_packet_counter);
-			mutex_unlock(&spec->lock);
+
+	if (peer->advanced_security) {
+		for (i = 0; i < ARRAY_SIZE(wg->ispecs); ++i)
+		{
+			spec = &wg->ispecs[i];
+			if (spec->pkt_size > 0) {
+				mutex_lock(&spec->lock);
+				jp_spec_applymods(spec, peer);
+				wg_socket_send_buffer_to_peer(peer, spec->pkt, spec->pkt_size, 0, 0);
+				atomic_inc(&peer->jp_packet_counter);
+				mutex_unlock(&spec->lock);
+			}
 		}
 	}
-	
-	if (wg->jc && wg->jmax) {
+
+	if (peer->advanced_security && wg->jc && wg->jmax) {
 		net_dbg_ratelimited("%s: Sending dummy junk packets to %llu (%pISpfsc)\n",
 			    peer->device->dev->name, peer->internal_id,
 			    &peer->endpoint.addr);
@@ -79,7 +87,7 @@ static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 	}
 
 	if (wg_noise_handshake_create_initiation(&packet, &peer->handshake,
-			u32_range_pick_one(wg->init_header))) {
+			mh_peerheader(wg, peer->ranged_headers, wg->init_header))) {
 		wg_cookie_add_mac_to_packet(&packet, sizeof(packet), peer);
 		wg_timers_any_authenticated_packet_traversal(peer);
 		wg_timers_any_authenticated_packet_sent(peer);
@@ -146,7 +154,7 @@ void wg_packet_send_handshake_response(struct wg_peer *peer)
 			    &peer->endpoint.addr);
 
 	if (wg_noise_handshake_create_response(&packet, &peer->handshake,
-			u32_range_pick_one(wg->resp_header))) {
+			mh_peerheader(wg, peer->ranged_headers, wg->resp_header))) {
 		wg_cookie_add_mac_to_packet(&packet, sizeof(packet), peer);
 		if (wg_noise_handshake_begin_session(&peer->handshake,
 						     &peer->keypairs)) {
@@ -173,10 +181,10 @@ void wg_packet_send_handshake_cookie(struct wg_device *wg,
 				wg->dev->name, initiating_skb);
 	wg_cookie_message_create(&packet, initiating_skb, sender_index,
 				 &wg->cookie_checker,
-				 u32_range_pick_one(wg->cookie_header));
+				 mh_peerheader(wg, u32_range_lo(wg->cookie_header) != MESSAGE_HANDSHAKE_COOKIE, wg->cookie_header));
 	wg_socket_send_buffer_as_reply_to_skb(wg, initiating_skb, &packet,
 					      sizeof(packet),
-						  wg->cookie_padding);
+						  u32_range_lo(wg->cookie_header) != MESSAGE_HANDSHAKE_COOKIE ? wg->cookie_padding : 0);
 }
 
 static int key_fresh_timeout(struct wg_peer *peer)
@@ -237,7 +245,7 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
 	int padding;
 	u16_range_t content_padding_addition;
 
-	padding = peer->device->transport_padding;
+	padding = (peer->advanced_security && peer->junk_offsets) ? peer->device->transport_padding : 0;
 	content_padding_addition = peer->device->content_padding_addition;
 
 	udp_window = padding + MESSAGE_MINIMUM_LENGTH + skb->len;
@@ -289,7 +297,7 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
 	skb_set_inner_network_header(skb, 0);
 	header = (struct message_data *)skb_push(skb, sizeof(*header));
 	header->header.type = cpu_to_le32(
-		u32_range_pick_one(peer->device->transport_header));
+		mh_peerheader(peer->device, peer->ranged_headers, peer->device->transport_header));
 	header->key_idx = keypair->remote_index;
 	header->counter = cpu_to_le64(PACKET_CB(skb)->nonce);
 	pskb_put(skb, trailer, trailer_len);
