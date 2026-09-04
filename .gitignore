@@ -27,3 +27,5 @@ src/kernel
 .cache
 compile_commands.json
 .clangd
+agents.md
+.opencode.jsonc
