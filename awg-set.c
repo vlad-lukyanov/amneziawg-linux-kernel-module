@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Minimal genetlink helper to configure amneziawg interfaces.
- * Usage: awg-set <ifname> [options...]
+ * Supports multiple peers in a single invocation.
  *
- * Options mirror wg(8) plus AWG-specific: h1, h2, h3, h4, s1, s2, s3, s4,
- * jc, jmin, jmax, i1..i5, header-protection-key, random-trailers,
- * content-padding-addition.
+ * Usage: awg-set <ifname> [device-options...] [peer <pubkey> [peer-options...] ...]
+ *
+ * Device options: listen-port, private-key, fwmark, h1-h4, s1-s4, jc, jmin, jmax
+ * Peer options: preshared-key, endpoint, allowed-ips, persistent-keepalive,
+ *               replace-allowed-ips, peer-flags
  */
 
 #include <stdio.h>
@@ -22,8 +24,10 @@
 #define WG_KEY_LEN 32
 #define WG_GENL_NAME "amneziawg"
 #define WG_GENL_VERSION 3
+#define MAX_PEERS 64
+#define MAX_ALLOWED_IPS 32
+#define NLMSG_BUF_SIZE 65536
 
-/* Enums matching uapi/wireguard.h */
 enum wg_cmd { WG_CMD_GET_DEVICE, WG_CMD_SET_DEVICE, __WG_CMD_MAX };
 enum wgdevice_attribute {
 	WGDEVICE_A_UNSPEC, WGDEVICE_A_IFINDEX, WGDEVICE_A_IFNAME,
@@ -68,6 +72,29 @@ enum wgallowedip_attribute {
 
 static int genl_fd;
 static __u32 genl_id;
+
+struct allowed_ip {
+	int family;
+	union {
+		struct in_addr v4;
+		struct in6_addr v6;
+	} addr;
+	int cidr;
+};
+
+struct peer_config {
+	unsigned char public_key[WG_KEY_LEN];
+	unsigned char preshared_key[WG_KEY_LEN];
+	int has_psk;
+	int has_endpoint;
+	int has_keepalive;
+	int has_flags;
+	__u32 flags;
+	__u16 keepalive;
+	char endpoint_str[256];
+	struct allowed_ip allowed_ips[MAX_ALLOWED_IPS];
+	int allowed_ip_count;
+};
 
 static inline __u16 nla_get_u16(struct nlattr *attr)
 {
@@ -163,7 +190,6 @@ static int base64_decode(const char *src, unsigned char *dst, int dst_len)
 	if (src[0] == '\0') return -1;
 
 	while (src[i] && src[i] != '=') i++;
-	/* Count padding */
 	pad = (src[i] == '=') ? (src[i+1] == '=' ? 2 : 1) : 0;
 	int data_len = i;
 	int total = data_len + pad;
@@ -171,7 +197,6 @@ static int base64_decode(const char *src, unsigned char *dst, int dst_len)
 
 	if (out_len > dst_len) return -1;
 
-	/* Reset and re-decode properly */
 	i = 0;
 	j = 0;
 	val = 0;
@@ -190,7 +215,6 @@ static int base64_decode(const char *src, unsigned char *dst, int dst_len)
 			group = 0;
 		}
 	}
-	/* Handle remaining padding */
 	if (group == 3) {
 		val <<= 6;
 		if (j < out_len) dst[j++] = val >> 16;
@@ -222,7 +246,7 @@ static inline int nla_put(struct nlmsghdr *nlh, int attrtype, int attrlen, const
 	int rta_len = NLA_ALIGN(nla_len);
 	struct nlattr *nla = (struct nlattr *)((char *)nlh + nlh->nlmsg_len);
 
-	if (nlh->nlmsg_len + rta_len > 8192) return -EMSGSIZE;
+	if (nlh->nlmsg_len + rta_len > NLMSG_BUF_SIZE) return -EMSGSIZE;
 	nla->nla_type = attrtype;
 	nla->nla_len = nla_len;
 	memcpy((char *)nla + NLA_HDRLEN, data, attrlen);
@@ -250,11 +274,6 @@ static inline int nla_put_u64(struct nlmsghdr *nlh, int attrtype, __u64 val)
 	return nla_put(nlh, attrtype, sizeof(val), &val);
 }
 
-static inline int nla_put_flag(struct nlmsghdr *nlh, int attrtype)
-{
-	return nla_put(nlh, attrtype, 0, NULL);
-}
-
 static inline int nla_nest_start(struct nlmsghdr *nlh, int attrtype)
 {
 	struct nlattr *nla = (struct nlattr *)((char *)nlh + nlh->nlmsg_len);
@@ -280,38 +299,92 @@ static int parse_key(const char *str, unsigned char *key)
 	return base64_decode(str, key, WG_KEY_LEN) == WG_KEY_LEN ? 0 : -1;
 }
 
+static int emit_peer(struct nlmsghdr *nlh, struct peer_config *p)
+{
+	int peer_nest = nla_nest_start(nlh, 0);
+
+	nla_put(nlh, WGPEER_A_PUBLIC_KEY, WG_KEY_LEN, p->public_key);
+
+	if (p->has_flags)
+		nla_put_u32(nlh, WGPEER_A_FLAGS, p->flags);
+
+	if (p->has_psk)
+		nla_put(nlh, WGPEER_A_PRESHARED_KEY, WG_KEY_LEN, p->preshared_key);
+
+	if (p->has_endpoint) {
+		struct sockaddr_in addr4;
+		struct sockaddr_in6 addr6;
+		char ep_buf[256];
+		char *colon;
+		int port = 0;
+
+		memset(&addr4, 0, sizeof(addr4));
+		memset(&addr6, 0, sizeof(addr6));
+		strncpy(ep_buf, p->endpoint_str, sizeof(ep_buf) - 1);
+		ep_buf[sizeof(ep_buf) - 1] = 0;
+
+		colon = strrchr(ep_buf, ':');
+		if (colon) { *colon = 0; port = atoi(colon + 1); }
+
+		if (inet_pton(AF_INET, ep_buf, &addr4.sin_addr) == 1) {
+			addr4.sin_family = AF_INET;
+			addr4.sin_port = htons(port);
+			nla_put(nlh, WGPEER_A_ENDPOINT, sizeof(addr4), &addr4);
+		} else if (inet_pton(AF_INET6, ep_buf, &addr6.sin6_addr) == 1) {
+			addr6.sin6_family = AF_INET6;
+			addr6.sin6_port = htons(port);
+			nla_put(nlh, WGPEER_A_ENDPOINT, sizeof(addr6), &addr6);
+		}
+	}
+
+	if (p->has_keepalive)
+		nla_put_u16(nlh, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL, p->keepalive);
+
+	if (p->allowed_ip_count > 0) {
+		int ip_nest = nla_nest_start(nlh, WGPEER_A_ALLOWEDIPS);
+		int k;
+		for (k = 0; k < p->allowed_ip_count; k++) {
+			struct allowed_ip *aip = &p->allowed_ips[k];
+			int family_nest = nla_nest_start(nlh, 0);
+			nla_put_u16(nlh, WGALLOWEDIP_A_FAMILY, aip->family);
+			if (aip->family == AF_INET)
+				nla_put(nlh, WGALLOWEDIP_A_IPADDR, 4, &aip->addr.v4);
+			else
+				nla_put(nlh, WGALLOWEDIP_A_IPADDR, 16, &aip->addr.v6);
+			nla_put_u8(nlh, WGALLOWEDIP_A_CIDR_MASK, aip->cidr);
+			nla_nest_end(nlh, family_nest);
+		}
+		nla_nest_end(nlh, ip_nest);
+	}
+
+	nla_nest_end(nlh, peer_nest);
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
-	char buf[8192];
+	char buf[NLMSG_BUF_SIZE];
 	struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
 	struct genlmsghdr *ghdr;
 	unsigned char private_key[WG_KEY_LEN] = {0};
-	unsigned char psk[WG_KEY_LEN] = {0};
-	unsigned char peer_pub[WG_KEY_LEN] = {0};
 	const char *ifname = NULL;
 	const char *privkey_path = NULL;
-	const char *psk_path = NULL;
-	const char *endpoint = NULL;
-	const char *peer_pubkey = NULL;
-	const char *allowed_ips = NULL;
 	__u16 listen_port = 0;
 	__u32 fwmark = 0;
-	__u32 flags = 0;
 	__u16 jc = 0, jmin = 0, jmax = 0;
 	__u16 s1 = 0, s2 = 0, s3 = 0, s4 = 0;
-	__u16 keepalive = 0;
 	int has_h1 = 0, has_h2 = 0, has_h3 = 0, has_h4 = 0;
 	__u64 h1 = 0, h2 = 0, h3 = 0, h4 = 0;
 	int has_listen_port = 0, has_privkey = 0;
 	int has_jc = 0, has_s1 = 0, has_s2 = 0, has_s3 = 0, has_s4 = 0;
-	int has_flags = 0;
-	int i;
-	__u32 replace_allowedips = 0;
-	int has_peer = 0;
-	int has_keepalive = 0;
+	int i, ret;
+
+	struct peer_config peers[MAX_PEERS];
+	int peer_count = 0;
+	struct peer_config *cur = NULL;
 
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <ifname> [options...]\n", argv[0]);
+		fprintf(stderr, "Usage: %s <ifname> [options...] [peer <pubkey> [peer-options...] ...]\n", argv[0]);
 		return 1;
 	}
 	ifname = argv[1];
@@ -353,20 +426,63 @@ int main(int argc, char *argv[])
 			{ char *arg = argv[++i]; char *dash = strchr(arg, '-');
 			if (dash) { *dash = 0; h4 = ((__u64)strtoull(dash+1,NULL,10) << 32) | strtoull(arg,NULL,10); }
 			else { h4 = strtoull(arg, NULL, 10); } } has_h4 = 1;
-		} else if (strcmp(argv[i], "replace-allowed-ips") == 0) {
-			replace_allowedips = 1; has_flags = 1;
 		} else if (strcmp(argv[i], "peer") == 0 && i + 1 < argc) {
-			peer_pubkey = argv[++i]; has_peer = 1;
-		} else if (strcmp(argv[i], "preshared-key") == 0 && i + 1 < argc) {
-			psk_path = argv[++i];
-		} else if (strcmp(argv[i], "endpoint") == 0 && i + 1 < argc) {
-			endpoint = argv[++i];
-		} else if (strcmp(argv[i], "allowed-ips") == 0 && i + 1 < argc) {
-			allowed_ips = argv[++i];
-		} else if (strcmp(argv[i], "persistent-keepalive") == 0 && i + 1 < argc) {
-			keepalive = atoi(argv[++i]); has_keepalive = 1;
-		} else if (strcmp(argv[i], "peer-flags") == 0 && i + 1 < argc) {
-			flags = atoi(argv[++i]); has_flags = 1;
+			if (peer_count >= MAX_PEERS) {
+				fprintf(stderr, "Too many peers (max %d)\n", MAX_PEERS);
+				return 1;
+			}
+			cur = &peers[peer_count];
+			memset(cur, 0, sizeof(*cur));
+			if (parse_key(argv[++i], cur->public_key) < 0) {
+				fprintf(stderr, "Bad peer pubkey: %s\n", argv[i]);
+				return 1;
+			}
+			peer_count++;
+		} else if (cur) {
+			/* Peer sub-options */
+			if (strcmp(argv[i], "preshared-key") == 0 && i + 1 < argc) {
+				read_key_file(argv[++i], cur->preshared_key);
+				cur->has_psk = 1;
+			} else if (strcmp(argv[i], "endpoint") == 0 && i + 1 < argc) {
+				strncpy(cur->endpoint_str, argv[++i], sizeof(cur->endpoint_str) - 1);
+				cur->has_endpoint = 1;
+			} else if (strcmp(argv[i], "allowed-ips") == 0 && i + 1 < argc) {
+				char *tmp = strdup(argv[++i]);
+				char *saveptr, *token;
+				token = strtok_r(tmp, ",", &saveptr);
+				while (token && cur->allowed_ip_count < MAX_ALLOWED_IPS) {
+					char *slash = strchr(token, '/');
+					if (slash) {
+						*slash = 0;
+						int cidr = atoi(slash + 1);
+						struct allowed_ip *aip = &cur->allowed_ips[cur->allowed_ip_count];
+						if (inet_pton(AF_INET, token, &aip->addr.v4) == 1) {
+							aip->family = AF_INET;
+						} else if (inet_pton(AF_INET6, token, &aip->addr.v6) == 1) {
+							aip->family = AF_INET6;
+						} else {
+							token = strtok_r(NULL, ",", &saveptr);
+							continue;
+						}
+						aip->cidr = cidr;
+						cur->allowed_ip_count++;
+					}
+					token = strtok_r(NULL, ",", &saveptr);
+				}
+				free(tmp);
+			} else if (strcmp(argv[i], "persistent-keepalive") == 0 && i + 1 < argc) {
+				cur->keepalive = atoi(argv[++i]);
+				cur->has_keepalive = 1;
+			} else if (strcmp(argv[i], "replace-allowed-ips") == 0) {
+				cur->flags |= WGPEER_F_REPLACE_ALLOWEDIPS;
+				cur->has_flags = 1;
+			} else if (strcmp(argv[i], "peer-flags") == 0 && i + 1 < argc) {
+				cur->flags = atoi(argv[++i]);
+				cur->has_flags = 1;
+			} else {
+				fprintf(stderr, "Unknown option: %s\n", argv[i]);
+				return 1;
+			}
 		} else {
 			fprintf(stderr, "Unknown option: %s\n", argv[i]);
 			return 1;
@@ -380,10 +496,6 @@ int main(int argc, char *argv[])
 	if (genl_id == 0) { fprintf(stderr, "Family %s not found\n", WG_GENL_NAME); return 1; }
 
 	if (has_privkey) read_key_file(privkey_path, private_key);
-	if (psk_path) read_key_file(psk_path, psk);
-	if (peer_pubkey) {
-		if (parse_key(peer_pubkey, peer_pub) < 0) { fprintf(stderr, "Bad peer pubkey\n"); return 1; }
-	}
 
 	/* Build SET_DEVICE message */
 	memset(buf, 0, sizeof(buf));
@@ -396,26 +508,18 @@ int main(int argc, char *argv[])
 	ghdr->cmd = WG_CMD_SET_DEVICE;
 	ghdr->version = WG_GENL_VERSION;
 
-	/* Ifindex */
 	int idx = if_nametoindex(ifname);
 	if (idx == 0) { fprintf(stderr, "Interface %s not found\n", ifname); return 1; }
 	nla_put_u32(nlh, WGDEVICE_A_IFINDEX, idx);
 
-	/* Private key */
 	if (has_privkey)
 		nla_put(nlh, WGDEVICE_A_PRIVATE_KEY, WG_KEY_LEN, private_key);
 
-	/* Listen port */
 	if (has_listen_port)
 		nla_put_u16(nlh, WGDEVICE_A_LISTEN_PORT, listen_port);
 
-	/* FWmark */
 	if (fwmark)
 		nla_put_u32(nlh, WGDEVICE_A_FWMARK, fwmark);
-
-	/* Replace allowed IPs */
-	if (replace_allowedips)
-		flags |= WGPEER_F_REPLACE_ALLOWEDIPS;
 
 	/* AWG-specific device options */
 	if (has_jc) {
@@ -432,95 +536,22 @@ int main(int argc, char *argv[])
 	if (has_h3) nla_put_u64(nlh, WGDEVICE_A_H3, h3);
 	if (has_h4) nla_put_u64(nlh, WGDEVICE_A_H4, h4);
 
-	/* Peer */
-	if (has_peer) {
-		int peer_start = nla_nest_start(nlh, WGDEVICE_A_PEERS);
-		int peer_nest = nla_nest_start(nlh, 0);
-
-		nla_put(nlh, WGPEER_A_PUBLIC_KEY, WG_KEY_LEN, peer_pub);
-
-		if (has_flags)
-			nla_put_u32(nlh, WGPEER_A_FLAGS, flags);
-
-		if (psk_path)
-			nla_put(nlh, WGPEER_A_PRESHARED_KEY, WG_KEY_LEN, psk);
-
-		if (endpoint) {
-			struct sockaddr_in addr4;
-			struct sockaddr_in6 addr6;
-			char ep_buf[256];
-			char *colon;
-			int port = 0;
-
-			memset(&addr4, 0, sizeof(addr4));
-			memset(&addr6, 0, sizeof(addr6));
-			strncpy(ep_buf, endpoint, sizeof(ep_buf) - 1);
-			ep_buf[sizeof(ep_buf) - 1] = 0;
-
-			colon = strrchr(ep_buf, ':');
-			if (colon) { *colon = 0; port = atoi(colon + 1); }
-
-			if (inet_pton(AF_INET, ep_buf, &addr4.sin_addr) == 1) {
-				addr4.sin_family = AF_INET;
-				addr4.sin_port = htons(port);
-				nla_put(nlh, WGPEER_A_ENDPOINT, sizeof(addr4), &addr4);
-			} else if (inet_pton(AF_INET6, ep_buf, &addr6.sin6_addr) == 1) {
-				addr6.sin6_family = AF_INET6;
-				addr6.sin6_port = htons(port);
-				nla_put(nlh, WGPEER_A_ENDPOINT, sizeof(addr6), &addr6);
-			}
-		}
-
-		if (has_keepalive)
-			nla_put_u16(nlh, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL, keepalive);
-
-		/* Parse allowed-ips */
-		if (allowed_ips) {
-			int ip_nest = nla_nest_start(nlh, WGPEER_A_ALLOWEDIPS);
-			char *tmp = strdup(allowed_ips);
-			char *saveptr, *token;
-			token = strtok_r(tmp, ",", &saveptr);
-			while (token) {
-				char *slash = strchr(token, '/');
-				if (slash) {
-					*slash = 0;
-					int cidr = atoi(slash + 1);
-					struct in_addr addr4;
-					struct in6_addr addr6;
-					int family_nest = nla_nest_start(nlh, 0);
-					__u16 family;
-					if (inet_pton(AF_INET, token, &addr4) == 1) {
-						family = AF_INET;
-						nla_put_u16(nlh, WGALLOWEDIP_A_FAMILY, family);
-						nla_put(nlh, WGALLOWEDIP_A_IPADDR, 4, &addr4);
-					} else if (inet_pton(AF_INET6, token, &addr6) == 1) {
-						family = AF_INET6;
-						nla_put_u16(nlh, WGALLOWEDIP_A_FAMILY, family);
-						nla_put(nlh, WGALLOWEDIP_A_IPADDR, 16, &addr6);
-					} else {
-						token = strtok_r(NULL, ",", &saveptr);
-						continue;
-					}
-					nla_put_u8(nlh, WGALLOWEDIP_A_CIDR_MASK, cidr);
-					nla_nest_end(nlh, family_nest);
-				}
-				token = strtok_r(NULL, ",", &saveptr);
-			}
-			free(tmp);
-			nla_nest_end(nlh, ip_nest);
-		}
-
-		nla_nest_end(nlh, peer_nest);
-		nla_nest_end(nlh, peer_start);
+	/* Emit all peers under WGDEVICE_A_PEERS */
+	if (peer_count > 0) {
+		int peers_nest = nla_nest_start(nlh, WGDEVICE_A_PEERS);
+		int p;
+		for (p = 0; p < peer_count; p++)
+			emit_peer(nlh, &peers[p]);
+		nla_nest_end(nlh, peers_nest);
 	}
 
 	char reply[4096];
-	int ret = send_recv(nlh, reply, sizeof(reply));
+	ret = send_recv(nlh, reply, sizeof(reply));
 	if (ret < 0) {
 		fprintf(stderr, "Netlink error: %s\n", strerror(-ret));
 		return 1;
 	}
 
-	printf("OK: %s configured\n", ifname);
+	printf("OK: %s configured (%d peer(s))\n", ifname, peer_count);
 	return 0;
 }
