@@ -338,15 +338,23 @@ int main(int argc, char *argv[])
 		} else if (strcmp(argv[i], "s4") == 0 && i + 1 < argc) {
 			s4 = atoi(argv[++i]); has_s4 = 1;
 		} else if (strcmp(argv[i], "h1") == 0 && i + 1 < argc) {
-			h1 = strtoull(argv[++i], NULL, 10); has_h1 = 1;
+			{ char *arg = argv[++i]; char *dash = strchr(arg, '-');
+			if (dash) { *dash = 0; h1 = ((__u64)strtoull(dash+1,NULL,10) << 32) | strtoull(arg,NULL,10); }
+			else { h1 = strtoull(arg, NULL, 10); } } has_h1 = 1;
 		} else if (strcmp(argv[i], "h2") == 0 && i + 1 < argc) {
-			h2 = strtoull(argv[++i], NULL, 10); has_h2 = 1;
+			{ char *arg = argv[++i]; char *dash = strchr(arg, '-');
+			if (dash) { *dash = 0; h2 = ((__u64)strtoull(dash+1,NULL,10) << 32) | strtoull(arg,NULL,10); }
+			else { h2 = strtoull(arg, NULL, 10); } } has_h2 = 1;
 		} else if (strcmp(argv[i], "h3") == 0 && i + 1 < argc) {
-			h3 = strtoull(argv[++i], NULL, 10); has_h3 = 1;
+			{ char *arg = argv[++i]; char *dash = strchr(arg, '-');
+			if (dash) { *dash = 0; h3 = ((__u64)strtoull(dash+1,NULL,10) << 32) | strtoull(arg,NULL,10); }
+			else { h3 = strtoull(arg, NULL, 10); } } has_h3 = 1;
 		} else if (strcmp(argv[i], "h4") == 0 && i + 1 < argc) {
-			h4 = strtoull(argv[++i], NULL, 10); has_h4 = 1;
+			{ char *arg = argv[++i]; char *dash = strchr(arg, '-');
+			if (dash) { *dash = 0; h4 = ((__u64)strtoull(dash+1,NULL,10) << 32) | strtoull(arg,NULL,10); }
+			else { h4 = strtoull(arg, NULL, 10); } } has_h4 = 1;
 		} else if (strcmp(argv[i], "replace-allowed-ips") == 0) {
-			replace_allowedips = 1;
+			replace_allowedips = 1; has_flags = 1;
 		} else if (strcmp(argv[i], "peer") == 0 && i + 1 < argc) {
 			peer_pubkey = argv[++i]; has_peer = 1;
 		} else if (strcmp(argv[i], "preshared-key") == 0 && i + 1 < argc) {

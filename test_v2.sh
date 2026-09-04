@@ -136,7 +136,7 @@ ip netns exec "$NS_SERVER" ip link add wg0 type amneziawg
 ip netns exec "$NS_SERVER" ip link set wg0 up
 ip netns exec "$NS_SERVER" ip addr add 192.168.0.1/24 dev wg0
 
-# Server config via awg-set
+# Server: device-level config (no peers yet)
 ip netns exec "$NS_SERVER" "$AWG_SET" wg0 \
     private-key "$TMPDIR/server.key" \
     listen-port 51820 \
@@ -145,22 +145,32 @@ ip netns exec "$NS_SERVER" "$AWG_SET" wg0 \
     h3 300000000-300000100 \
     h4 400000000-400000100 \
     s1 24 s2 24 s3 24 s4 24 \
-    jc 4 jmin 40 jmax 80 \
+    jc 4 jmin 40 jmax 80
+
+# Server: add peers one by one
+ip netns exec "$NS_SERVER" "$AWG_SET" wg0 \
     peer "$CLIENT1_PUB" \
+        replace-allowed-ips \
         preshared-key "$TMPDIR/psk.key" \
         endpoint 127.0.0.1:51821 \
         allowed-ips 192.168.0.2/32 \
-        persistent-keepalive 25 \
-        peer "$CLIENT2_PUB" \
-            preshared-key "$TMPDIR/psk.key" \
-            endpoint 127.0.0.1:51822 \
-            allowed-ips 192.168.1.2/32 \
-            persistent-keepalive 25 \
-        peer "$CLIENT3_PUB" \
-            preshared-key "$TMPDIR/psk.key" \
-            endpoint 127.0.0.1:51823 \
-            allowed-ips 192.168.2.2/32 \
-            persistent-keepalive 25
+        persistent-keepalive 25
+
+ip netns exec "$NS_SERVER" "$AWG_SET" wg0 \
+    peer "$CLIENT2_PUB" \
+        replace-allowed-ips \
+        preshared-key "$TMPDIR/psk.key" \
+        endpoint 127.0.0.1:51822 \
+        allowed-ips 192.168.1.2/32 \
+        persistent-keepalive 25
+
+ip netns exec "$NS_SERVER" "$AWG_SET" wg0 \
+    peer "$CLIENT3_PUB" \
+        replace-allowed-ips \
+        preshared-key "$TMPDIR/psk.key" \
+        endpoint 127.0.0.1:51823 \
+        allowed-ips 192.168.2.2/32 \
+        persistent-keepalive 25
 
 # Client1: AWG 2.0 — same ranges
 ip netns exec "$NS_CLIENT1" ip link add wg0 type amneziawg
