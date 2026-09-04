@@ -257,6 +257,12 @@ static void wg_destruct(struct net_device *dev)
 	struct wg_device *wg = netdev_priv(dev);
 	int i;
 
+	/* Flush workqueues before freeing spec data to prevent use-after-free
+	 * in transmit_handshake_work which accesses ispecs[].pkt
+	 */
+	flush_workqueue(wg->handshake_send_wq);
+	flush_workqueue(wg->packet_crypt_wq);
+
 	for (i = 0; i < ARRAY_SIZE(wg->ispecs); ++i)
 		jp_spec_free(&wg->ispecs[i]);
 
