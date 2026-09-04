@@ -152,7 +152,7 @@ ip netns exec "$NS_SERVER" "$AWG_SET" wg0 \
     peer "$CLIENT1_PUB" \
         replace-allowed-ips \
         preshared-key "$TMPDIR/psk.key" \
-        endpoint 127.0.0.1:51821 \
+        endpoint 10.0.0.2:51821 \
         allowed-ips 192.168.0.2/32 \
         persistent-keepalive 25
 
@@ -160,7 +160,7 @@ ip netns exec "$NS_SERVER" "$AWG_SET" wg0 \
     peer "$CLIENT2_PUB" \
         replace-allowed-ips \
         preshared-key "$TMPDIR/psk.key" \
-        endpoint 127.0.0.1:51822 \
+        endpoint 10.0.1.2:51822 \
         allowed-ips 192.168.1.2/32 \
         persistent-keepalive 25
 
@@ -168,7 +168,7 @@ ip netns exec "$NS_SERVER" "$AWG_SET" wg0 \
     peer "$CLIENT3_PUB" \
         replace-allowed-ips \
         preshared-key "$TMPDIR/psk.key" \
-        endpoint 127.0.0.1:51823 \
+        endpoint 10.0.2.2:51823 \
         allowed-ips 192.168.2.2/32 \
         persistent-keepalive 25
 
@@ -187,7 +187,7 @@ ip netns exec "$NS_CLIENT1" "$AWG_SET" wg0 \
     s1 24 s2 24 s3 24 s4 24 \
     peer "$SERVER_PUB" \
         preshared-key "$TMPDIR/psk.key" \
-        endpoint 127.0.0.1:51820 \
+        endpoint 10.0.0.1:51820 \
         allowed-ips 192.168.0.0/24
 
 ip netns exec "$NS_CLIENT1" ping -c 2 -W 3 192.168.0.1 >/dev/null 2>&1 && \
@@ -213,7 +213,7 @@ ip netns exec "$NS_CLIENT2" "$AWG_SET" wg0 \
     h4 400000000 \
     peer "$SERVER_PUB" \
         preshared-key "$TMPDIR/psk.key" \
-        endpoint 127.0.0.1:51820 \
+        endpoint 10.0.1.1:51820 \
         allowed-ips 192.168.1.0/24
 
 ip netns exec "$NS_CLIENT2" ping -c 2 -W 3 192.168.1.1 >/dev/null 2>&1 && \
@@ -236,7 +236,7 @@ ip netns exec "$NS_CLIENT3" wg set wg0 \
     peer "$SERVER_PUB" \
         preshared-key "$TMPDIR/psk.key" \
         allowed-ips 192.168.2.0/24 \
-        endpoint 127.0.0.1:51820
+        endpoint 10.0.2.1:51820
 
 ip netns exec "$NS_CLIENT3" ping -c 2 -W 3 192.168.2.1 >/dev/null 2>&1 && \
     pass "TEST 3: AWG 2.0 <-> legacy WG ping OK" || \
